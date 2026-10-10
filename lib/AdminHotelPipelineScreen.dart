@@ -22,7 +22,7 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
   // Search and filter state
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = "";
-  int _selectedFilterTab = 0; // 0 = Pending, 1 = Rejected, 2 = All Pipeline
+  int _selectedFilterTab = 0; // 0 = Pending, 1 = Approved, 2 = Rejected, 3 = All Pipeline
 
   @override
   void initState() {
@@ -108,6 +108,126 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
     } finally {
       if (mounted) setState(() => _processing = false);
     }
+  }
+
+  Future<void> _deleteHotelPermanently(String id, String hotelName) async {
+    setState(() => _processing = true);
+    try {
+      // 1. Delete associated rooms first
+      await _supabase.from('rooms').delete().eq('hotel_id', id);
+      // 2. Delete hotel record permanently
+      await _supabase.from('hotels').delete().eq('id', id);
+
+      _notify("$hotelName was permanently deleted from database.", AppColors.rose);
+      setState(() {
+        _streamKey++;
+        _selectedHotelWeb = null;
+      });
+    } catch (e) {
+      _notify("Failed to delete hotel: $e", AppColors.rose);
+    } finally {
+      if (mounted) setState(() => _processing = false);
+    }
+  }
+
+  void _showDeleteConfirmationDialog(String hotelId, String hotelName) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceCard,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: AppColors.rose, width: 1.5),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.rose.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.delete_forever_rounded, color: AppColors.rose, size: 24),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                "Delete Hotel Permanently?",
+                style: GoogleFonts.plusJakartaSans(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: 440,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "Are you sure you want to completely remove $hotelName from the database?",
+                style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppColors.rose.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.rose.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: AppColors.rose, size: 18),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        "WARNING: This will permanently delete the hotel record and all associated room listings from Supabase. This action CANNOT be undone.",
+                        style: GoogleFonts.plusJakartaSans(
+                          color: AppColors.roseLight,
+                          fontSize: 11.5,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                "Hotel ID: $hotelId",
+                style: GoogleFonts.jetBrainsMono(color: AppColors.textMuted, fontSize: 10.5),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("CANCEL", style: TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.bold)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _deleteHotelPermanently(hotelId, hotelName);
+            },
+            icon: const Icon(Icons.delete_forever_rounded, size: 16),
+            label: const Text("DELETE FROM DATABASE", style: TextStyle(fontWeight: FontWeight.bold)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.rose,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showRejectDialog(String hotelId, String hotelName) {
@@ -319,21 +439,25 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                 return s == 'pending' || item['is_approved'] == false;
               }).toList();
 
+              final approvedHotelsList = rawHotels.where((item) {
+                final s = (item['status'] ?? '').toString().toLowerCase().trim();
+                return s == 'approved' || item['is_approved'] == true;
+              }).toList();
+
               final rejectedHotelsList = rawHotels.where((item) {
                 final s = (item['status'] ?? '').toString().toLowerCase().trim();
                 return s == 'rejected';
               }).toList();
 
-              final allPipelineList = rawHotels.where((item) {
-                final s = (item['status'] ?? '').toString().toLowerCase().trim();
-                return s != 'approved' && item['is_approved'] != true;
-              }).toList();
+              final allPipelineList = rawHotels;
 
               // Filter based on selected tab
               final List<Map<String, dynamic>> tabFiltered;
               if (_selectedFilterTab == 0) {
                 tabFiltered = pendingHotelsList;
               } else if (_selectedFilterTab == 1) {
+                tabFiltered = approvedHotelsList;
+              } else if (_selectedFilterTab == 2) {
                 tabFiltered = rejectedHotelsList;
               } else {
                 tabFiltered = allPipelineList;
@@ -370,20 +494,27 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                       children: [
                         _buildFilterTab(
                           index: 0,
-                          label: "Pending Audits",
+                          label: "Pending",
                           count: pendingHotelsList.length,
                           color: AppColors.amber,
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 6),
                         _buildFilterTab(
                           index: 1,
+                          label: "Approved",
+                          count: approvedHotelsList.length,
+                          color: AppColors.emerald,
+                        ),
+                        const SizedBox(width: 6),
+                        _buildFilterTab(
+                          index: 2,
                           label: "Rejected",
                           count: rejectedHotelsList.length,
                           color: AppColors.rose,
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 6),
                         _buildFilterTab(
-                          index: 2,
+                          index: 3,
                           label: "All Pipeline",
                           count: allPipelineList.length,
                           color: AppColors.goldPrimary,
@@ -463,14 +594,20 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                   ),
                                   child: Icon(
                                     _selectedFilterTab == 0
-                                        ? Icons.verified_rounded
+                                        ? Icons.pending_actions_rounded
                                         : (_selectedFilterTab == 1
-                                            ? Icons.rule_folder_rounded
-                                            : Icons.inbox_rounded),
+                                            ? Icons.check_circle_outline_rounded
+                                            : (_selectedFilterTab == 2
+                                                ? Icons.cancel_outlined
+                                                : Icons.account_balance_rounded)),
                                     size: 40,
-                                    color: _selectedFilterTab == 0
+                                    color: _selectedFilterTab == 1
                                         ? AppColors.emerald
-                                        : AppColors.textMuted,
+                                        : (_selectedFilterTab == 0
+                                            ? AppColors.amber
+                                            : (_selectedFilterTab == 2
+                                                ? AppColors.rose
+                                                : AppColors.goldPrimary)),
                                   ),
                                 ),
                                 const SizedBox(height: 16),
@@ -478,8 +615,10 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                   _selectedFilterTab == 0
                                       ? "Pending audit queue is clear!"
                                       : (_selectedFilterTab == 1
-                                          ? "No rejected applications found."
-                                          : "Pipeline is clear."),
+                                          ? "No approved hotel properties found."
+                                          : (_selectedFilterTab == 2
+                                              ? "No rejected applications found."
+                                              : "Pipeline has zero hotel entries.")),
                                   style: const TextStyle(
                                     color: AppColors.textPrimary,
                                     fontWeight: FontWeight.bold,
@@ -489,8 +628,10 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                 const SizedBox(height: 6),
                                 Text(
                                   _selectedFilterTab == 0
-                                      ? "All partner applications have been audited and processed."
-                                      : "No properties meet this criteria.",
+                                      ? "All venue submissions have been reviewed."
+                                      : (_selectedFilterTab == 1
+                                          ? "Approved properties will show here once audited."
+                                          : "No hotel listings meet this criteria."),
                                   style: const TextStyle(color: AppColors.textMuted, fontSize: 13),
                                 ),
                               ],
@@ -506,11 +647,21 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                               itemCount: queue.length,
                               itemBuilder: (context, index) {
                                 final hotel = queue[index];
+                                final hotelId = hotel['id'].toString();
+                                final hotelName = hotel['hotel_name'] ?? hotel['name'] ?? 'Verification Node';
                                 final bool isSelectedOnWeb =
                                     isDesktop && _selectedHotelWeb?['id'] == hotel['id'];
 
                                 final status = (hotel['status'] ?? 'pending').toString().toLowerCase().trim();
+                                final bool isApproved = status == 'approved' || hotel['is_approved'] == true;
                                 final bool isRejected = status == 'rejected';
+
+                                final Color statusColor = isApproved
+                                    ? AppColors.emerald
+                                    : (isRejected ? AppColors.rose : AppColors.amber);
+                                final String statusLabel = isApproved
+                                    ? "APPROVED"
+                                    : (isRejected ? "REJECTED" : "PENDING AUDIT");
 
                                 return Container(
                                   margin: const EdgeInsets.only(bottom: 12),
@@ -521,14 +672,14 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                     borderRadius: BorderRadius.circular(18),
                                     border: Border.all(
                                       color: isSelectedOnWeb
-                                          ? (isRejected ? AppColors.rose : AppColors.goldPrimary).withValues(alpha: 0.6)
+                                          ? statusColor.withValues(alpha: 0.6)
                                           : AppColors.surfaceBorder,
                                       width: isSelectedOnWeb ? 1.5 : 1.0,
                                     ),
                                     boxShadow: [
                                       if (isSelectedOnWeb)
                                         BoxShadow(
-                                          color: (isRejected ? AppColors.rose : AppColors.goldPrimary).withValues(alpha: 0.1),
+                                          color: statusColor.withValues(alpha: 0.1),
                                           blurRadius: 16,
                                         ),
                                     ],
@@ -563,7 +714,7 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                             child: hotel['image_url'] == null
                                                 ? Icon(
                                                     Icons.hotel_rounded,
-                                                    color: isRejected ? AppColors.rose : AppColors.goldPrimary,
+                                                    color: statusColor,
                                                     size: 24,
                                                   )
                                                 : null,
@@ -577,7 +728,7 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                                   children: [
                                                     Expanded(
                                                       child: Text(
-                                                        hotel['hotel_name'] ?? 'Verification Node',
+                                                        hotelName,
                                                         style: const TextStyle(
                                                           fontWeight: FontWeight.w700,
                                                           color: AppColors.textPrimary,
@@ -593,16 +744,16 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                                         vertical: 3,
                                                       ),
                                                       decoration: BoxDecoration(
-                                                        color: (isRejected ? AppColors.rose : AppColors.amber).withValues(alpha: 0.12),
+                                                        color: statusColor.withValues(alpha: 0.12),
                                                         borderRadius: BorderRadius.circular(8),
                                                         border: Border.all(
-                                                          color: (isRejected ? AppColors.rose : AppColors.amber).withValues(alpha: 0.3),
+                                                          color: statusColor.withValues(alpha: 0.3),
                                                         ),
                                                       ),
                                                       child: Text(
-                                                        isRejected ? "REJECTED" : "PENDING AUDIT",
+                                                        statusLabel,
                                                         style: TextStyle(
-                                                          color: isRejected ? AppColors.rose : AppColors.amber,
+                                                          color: statusColor,
                                                           fontSize: 9,
                                                           fontWeight: FontWeight.bold,
                                                           letterSpacing: 0.5,
@@ -615,9 +766,13 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                                 Text(
                                                   isRejected
                                                       ? "Reason: ${hotel['reg_no'] ?? 'Credentials rejected'}"
-                                                      : "License: ${hotel['reg_no'] ?? 'Unspecified'}",
+                                                      : (isApproved
+                                                          ? "Active Partner • Reg: ${hotel['reg_no'] ?? 'Verified'}"
+                                                          : "License: ${hotel['reg_no'] ?? 'Unspecified'}"),
                                                   style: TextStyle(
-                                                    color: isRejected ? AppColors.roseLight.withValues(alpha: 0.8) : AppColors.textMuted,
+                                                    color: isRejected
+                                                        ? AppColors.roseLight.withValues(alpha: 0.8)
+                                                        : (isApproved ? AppColors.emeraldLight : AppColors.textMuted),
                                                     fontSize: 11,
                                                   ),
                                                   maxLines: 1,
@@ -636,6 +791,11 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                                                 ),
                                               ],
                                             ),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(Icons.delete_outline_rounded, color: AppColors.rose, size: 20),
+                                            tooltip: "Delete Hotel from Database",
+                                            onPressed: () => _showDeleteConfirmationDialog(hotelId, hotelName),
                                           ),
                                           const Icon(
                                             Icons.chevron_right_rounded,
@@ -759,7 +919,15 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
     final String hotelId = hotel['id'].toString();
     final String hotelName = hotel['hotel_name'] ?? 'Verification Overview';
     final status = (hotel['status'] ?? 'pending').toString().toLowerCase().trim();
+    final bool isApproved = status == 'approved' || hotel['is_approved'] == true;
     final bool isRejected = status == 'rejected';
+
+    final Color statusColor = isApproved
+        ? AppColors.emerald
+        : (isRejected ? AppColors.rose : AppColors.amber);
+    final String statusLabel = isApproved
+        ? "APPROVED"
+        : (isRejected ? "REJECTED" : "PENDING AUDIT");
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -782,11 +950,13 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    isRejected
-                        ? "Application has been marked as rejected. Hoteliers prompted to resubmit."
-                        : "Verify submitted legal credentials and identity cards before activating inventory.",
+                    isApproved
+                        ? "Property is actively approved and published to live inventory on customer apps."
+                        : (isRejected
+                            ? "Application has been marked as rejected. Hoteliers prompted to resubmit."
+                            : "Verify submitted legal credentials and identity cards before activating inventory."),
                     style: GoogleFonts.plusJakartaSans(
-                      color: AppColors.textMuted,
+                      color: isApproved ? AppColors.emeraldLight : AppColors.textMuted,
                       fontSize: 12,
                     ),
                   ),
@@ -796,14 +966,14 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
-                color: (isRejected ? AppColors.rose : AppColors.amber).withValues(alpha: 0.12),
+                color: statusColor.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: (isRejected ? AppColors.rose : AppColors.amber).withValues(alpha: 0.3)),
+                border: Border.all(color: statusColor.withValues(alpha: 0.3)),
               ),
               child: Text(
-                isRejected ? "REJECTED" : "PENDING AUDIT",
+                statusLabel,
                 style: TextStyle(
-                  color: isRejected ? AppColors.rose : AppColors.amber,
+                  color: statusColor,
                   fontWeight: FontWeight.bold,
                   fontSize: 11,
                   letterSpacing: 0.5,
@@ -942,7 +1112,71 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
         ),
 
         // Decision Action Suite
-        if (isRejected)
+        if (isApproved)
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _processing
+                      ? null
+                      : () {
+                          if (Navigator.canPop(context)) {
+                            Navigator.pop(context);
+                          }
+                          _showRejectDialog(hotelId, hotelName);
+                        },
+                  icon: const Icon(Icons.block_rounded, size: 18),
+                  label: const Text(
+                    "REVOKE / REJECT",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                      fontSize: 12,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.rose,
+                    side: const BorderSide(color: AppColors.rose),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _processing
+                      ? null
+                      : () {
+                          if (Navigator.canPop(context)) {
+                            Navigator.pop(context);
+                          }
+                          _restoreToPending(hotelId, hotelName);
+                        },
+                  icon: const Icon(Icons.replay_rounded, size: 18),
+                  label: const Text(
+                    "MOVE TO PENDING",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                      fontSize: 12,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.amber,
+                    side: const BorderSide(color: AppColors.amber),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          )
+        else if (isRejected)
           Row(
             children: [
               Expanded(
@@ -1079,6 +1313,39 @@ class _AdminHotelPipelineScreenState extends State<AdminHotelPipelineScreen> {
               ),
             ],
           ),
+
+        const SizedBox(height: 14),
+
+        // Permanent Deletion from Database Button
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _processing
+                ? null
+                : () {
+                    _showDeleteConfirmationDialog(hotelId, hotelName);
+                  },
+            icon: const Icon(Icons.delete_forever_rounded, color: AppColors.rose, size: 18),
+            label: const Text(
+              "REMOVE HOTEL / DELETE FROM DATABASE",
+              style: TextStyle(
+                color: AppColors.rose,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.8,
+                fontSize: 12,
+              ),
+            ),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.rose,
+              side: BorderSide(color: AppColors.rose.withValues(alpha: 0.6), width: 1.2),
+              backgroundColor: AppColors.rose.withValues(alpha: 0.05),
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14),
+              ),
+            ),
+          ),
+        ),
         const SizedBox(height: 20),
       ],
     );

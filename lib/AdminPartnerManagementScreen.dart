@@ -52,6 +52,7 @@ class _AdminPartnerManagementScreenState
 
   Future<void> _terminateAndKillPartnerRecord(String id) async {
     try {
+      await _supabase.from('rooms').delete().eq('hotel_id', id);
       await _supabase
           .from('hotels')
           .delete()

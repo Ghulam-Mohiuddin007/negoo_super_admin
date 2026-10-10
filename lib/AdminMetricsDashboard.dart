@@ -17,25 +17,37 @@ class AdminMetricsDashboard extends StatefulWidget {
 
 class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
   late final SupabaseClient _supabase;
-  int _dashboardKey = 0;
-  late Stream<List<Map<String, dynamic>>> _hotelsStream;
-  late Stream<List<Map<String, dynamic>>> _bookingsStream;
+  List<Map<String, dynamic>> _hotelsData = [];
+  List<Map<String, dynamic>> _bookingsData = [];
+  bool _isLoading = true;
+  String? _errorMessage;
 
   String _currentTimeString = "";
   Timer? _clockTimer;
+  Timer? _pollTimer;
+  StreamSubscription? _hotelsSub;
 
   @override
   void initState() {
     super.initState();
     _supabase = Supabase.instance.client;
-    _initStreams();
+    _fetchDashboardData();
     _updateClock();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) => _updateClock());
-  }
 
-  void _initStreams() {
-    _hotelsStream = _supabase.from('hotels').stream(primaryKey: ['id']);
-    _bookingsStream = _supabase.from('bookings').stream(primaryKey: ['id']);
+    // Hotels has realtime replication enabled
+    _hotelsSub = _supabase.from('hotels').stream(primaryKey: ['id']).listen((data) {
+      if (mounted) {
+        setState(() {
+          _hotelsData = data;
+        });
+      }
+    }, onError: (_) {});
+
+    // Rapid 3-second polling for bookings and live stats
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _fetchDashboardData(silent: true);
+    });
   }
 
   void _updateClock() {
@@ -49,15 +61,45 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
   @override
   void dispose() {
     _clockTimer?.cancel();
+    _pollTimer?.cancel();
+    _hotelsSub?.cancel();
     super.dispose();
   }
 
+  Future<void> _fetchDashboardData({bool silent = false}) async {
+    if (!silent && _hotelsData.isEmpty) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+
+    try {
+      final results = await Future.wait([
+        _supabase.from('hotels').select(),
+        _supabase.from('bookings').select(),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _hotelsData = List<Map<String, dynamic>>.from(results[0] as List);
+          _bookingsData = List<Map<String, dynamic>>.from(results[1] as List);
+          _isLoading = false;
+          _errorMessage = null;
+        });
+      }
+    } catch (e) {
+      if (mounted && _hotelsData.isEmpty) {
+        setState(() {
+          _errorMessage = e.toString();
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
   Future<void> _triggerMetricsRefresh() async {
-    setState(() {
-      _dashboardKey++;
-      _initStreams();
-    });
-    await Future.delayed(const Duration(milliseconds: 300));
+    await _fetchDashboardData(silent: false);
   }
 
   @override
@@ -111,53 +153,94 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
           const SizedBox(width: 16),
         ],
       ),
-      body: StreamBuilder<List<Map<String, dynamic>>>(
-        key: ValueKey('hotels_$_dashboardKey'),
-        stream: _hotelsStream,
-        builder: (context, hotelSnapshot) {
-          return StreamBuilder<List<Map<String, dynamic>>>(
-            key: ValueKey('bookings_$_dashboardKey'),
-            stream: _bookingsStream,
-            builder: (context, bookingSnapshot) {
-              if (hotelSnapshot.connectionState == ConnectionState.waiting &&
-                  !hotelSnapshot.hasData) {
-                return const Center(
-                  child: CircularProgressIndicator(color: AppColors.goldPrimary),
-                );
-              }
+      body: _buildDashboardBody(currencyFormat),
+    );
+  }
 
-              final hotelsData = hotelSnapshot.data ?? [];
-              final bookingsData = bookingSnapshot.data ?? [];
+  Widget _buildDashboardBody(NumberFormat currencyFormat) {
+    if (_isLoading && _hotelsData.isEmpty) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.goldPrimary),
+      );
+    }
 
-              // Compute Metrics
-              final int totalHotels = hotelsData.length;
-              final int approvedHotels = hotelsData.where((item) {
-                final s = (item['status'] ?? '').toString().toLowerCase().trim();
-                return s == 'approved' && item['is_approved'] == true;
-              }).length;
+    if (_errorMessage != null && _hotelsData.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.cloud_off_rounded, color: AppColors.rose, size: 48),
+              const SizedBox(height: 16),
+              Text(
+                "Dashboard Sync Error",
+                style: GoogleFonts.plusJakartaSans(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "$_errorMessage",
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                onPressed: _triggerMetricsRefresh,
+                icon: const Icon(Icons.refresh_rounded, size: 16),
+                label: const Text("RETRY LIVE CONNECTION", style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.goldPrimary,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
-              final int rejectedHotels = hotelsData.where((item) {
-                final s = (item['status'] ?? '').toString().toLowerCase().trim();
-                return s == 'rejected';
-              }).length;
+    final hotelsData = _hotelsData;
+    final bookingsData = _bookingsData;
 
-              final int pendingHotels = hotelsData.where((item) {
-                final s = (item['status'] ?? '').toString().toLowerCase().trim();
-                if (s == 'rejected' || s == 'blocked') return false;
-                if (s == 'approved' || item['is_approved'] == true) return false;
-                return s == 'pending' || item['is_approved'] == false;
-              }).length;
+    // Compute Metrics
+    final int totalHotels = hotelsData.length;
+    final int approvedHotels = hotelsData.where((item) {
+      final s = (item['status'] ?? '').toString().toLowerCase().trim();
+      return s == 'approved' && item['is_approved'] == true;
+    }).length;
 
-              double totalRevenue = 0.0;
-              int confirmedBookings = 0;
-              for (var b in bookingsData) {
-                final status = b['status']?.toString().toLowerCase();
-                if (status == 'confirmed' || status == 'settled_archived' || status == 'completed') {
-                  confirmedBookings++;
-                  totalRevenue += (double.tryParse(b['total_price']?.toString() ?? '0') ?? 0.0);
-                }
-              }
-              final double platformCommission = totalRevenue * 0.10;
+    final int rejectedHotels = hotelsData.where((item) {
+      final s = (item['status'] ?? '').toString().toLowerCase().trim();
+      return s == 'rejected';
+    }).length;
+
+    final int pendingHotels = hotelsData.where((item) {
+      final s = (item['status'] ?? '').toString().toLowerCase().trim();
+      if (s == 'rejected' || s == 'blocked') return false;
+      if (s == 'approved' || item['is_approved'] == true) return false;
+      return s == 'pending' || item['is_approved'] == false;
+    }).length;
+
+    double totalRevenue = 0.0;
+    int confirmedBookings = 0;
+    for (var b in bookingsData) {
+      final status = (b['status'] ?? '').toString().toLowerCase().trim();
+      if (status == 'confirmed' ||
+          status == 'payment_received' ||
+          status == 'cleared' ||
+          status == 'settled_archived' ||
+          status == 'completed') {
+        confirmedBookings++;
+        totalRevenue += (double.tryParse(b['total_price']?.toString() ?? '0') ?? 0.0);
+      }
+    }
+    final double platformCommission = totalRevenue * 0.10;
 
               return LayoutBuilder(
                 builder: (context, constraints) {
@@ -312,11 +395,6 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
                   );
                 },
               );
-            },
-          );
-        },
-      ),
-    );
   }
 
   Widget _buildVenueStatusDistributionCard({

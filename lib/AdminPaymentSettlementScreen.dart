@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -20,7 +21,15 @@ class _AdminPaymentSettlementScreenState
     extends State<AdminPaymentSettlementScreen> {
   late final SupabaseClient _supabase;
   bool _processing = false;
-  int _streamKey = 0;
+
+  // Real-time cached datasets
+  List<Map<String, dynamic>> _hotelsData = [];
+  List<Map<String, dynamic>> _roomsData = [];
+  List<Map<String, dynamic>> _bookingsData = [];
+  bool _isLoading = true;
+  String? _errorMessage;
+  Timer? _pollTimer;
+  StreamSubscription? _hotelsSub;
 
   // Search & Tab state
   final TextEditingController _searchController = TextEditingController();
@@ -36,19 +45,73 @@ class _AdminPaymentSettlementScreenState
         _searchQuery = _searchController.text.trim().toLowerCase();
       });
     });
+
+    _fetchLiveFinanceData();
+
+    // Hotels has realtime enabled in Supabase, listen live
+    _hotelsSub = _supabase.from('hotels').stream(primaryKey: ['id']).listen(
+      (data) {
+        if (mounted) {
+          setState(() {
+            _hotelsData = data;
+          });
+        }
+      },
+      onError: (_) {
+        // Fallback to polling silently
+      },
+    );
+
+    // Fast 3-second heartbeat polling for rooms and bookings
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _fetchLiveFinanceData(silent: true);
+    });
   }
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
+    _hotelsSub?.cancel();
     _searchController.dispose();
     super.dispose();
   }
 
+  Future<void> _fetchLiveFinanceData({bool silent = false}) async {
+    if (!silent && _hotelsData.isEmpty) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+    }
+
+    try {
+      final results = await Future.wait([
+        _supabase.from('hotels').select(),
+        _supabase.from('rooms').select(),
+        _supabase.from('bookings').select(),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _hotelsData = List<Map<String, dynamic>>.from(results[0] as List);
+          _roomsData = List<Map<String, dynamic>>.from(results[1] as List);
+          _bookingsData = List<Map<String, dynamic>>.from(results[2] as List);
+          _isLoading = false;
+          _errorMessage = null;
+        });
+      }
+    } catch (e) {
+      if (mounted && _hotelsData.isEmpty) {
+        setState(() {
+          _errorMessage = e.toString();
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
   Future<void> _handleManualRefresh() async {
-    setState(() {
-      _streamKey++;
-    });
-    await Future.delayed(const Duration(milliseconds: 300));
+    await _fetchLiveFinanceData(silent: false);
   }
 
   // Action 1: Mark Commission Received
@@ -61,9 +124,7 @@ class _AdminPaymentSettlementScreenState
           .eq('id', bookingId);
 
       _notify("Negoo 10% commission verified and recorded as Received!", AppColors.emerald);
-      setState(() {
-        _streamKey++;
-      });
+      await _fetchLiveFinanceData(silent: true);
     } catch (e) {
       _notify("Error updating payment: $e", AppColors.rose);
     } finally {
@@ -86,9 +147,7 @@ class _AdminPaymentSettlementScreenState
         "Commission Cleared! Negoo 10% cut (PKR ${NumberFormat('#,##0').format(commission)}) collected into platform treasury.",
         AppColors.emerald,
       );
-      setState(() {
-        _streamKey++;
-      });
+      await _fetchLiveFinanceData(silent: true);
     } catch (e) {
       _notify("Settlement failed: $e", AppColors.rose);
     } finally {
@@ -110,9 +169,7 @@ class _AdminPaymentSettlementScreenState
           .eq('id', hotelId);
 
       _notify("$hotelName has been BLOCKED. Live bidding and booking access revoked.", AppColors.rose);
-      setState(() {
-        _streamKey++;
-      });
+      await _fetchLiveFinanceData(silent: true);
     } catch (e) {
       _notify("Failed to block hotel: $e", AppColors.rose);
     } finally {
@@ -133,9 +190,7 @@ class _AdminPaymentSettlementScreenState
           .eq('id', hotelId);
 
       _notify("$hotelName unblocked and restored to active platform directory!", AppColors.emerald);
-      setState(() {
-        _streamKey++;
-      });
+      await _fetchLiveFinanceData(silent: true);
     } catch (e) {
       _notify("Failed to unblock hotel: $e", AppColors.rose);
     } finally {
@@ -159,9 +214,7 @@ class _AdminPaymentSettlementScreenState
         "All ${bookingIds.length} bookings for $hotelName cleared! Total settled: PKR ${NumberFormat('#,##0').format(totalAmount)}",
         AppColors.emerald,
       );
-      setState(() {
-        _streamKey++;
-      });
+      await _fetchLiveFinanceData(silent: true);
     } catch (e) {
       _notify("Bulk settlement failure: $e", AppColors.rose);
     } finally {
@@ -1625,28 +1678,61 @@ Reference: $invoiceNo
           const SizedBox(width: 16),
         ],
       ),
-      body: StreamBuilder<List<Map<String, dynamic>>>(
-        key: ValueKey('hotels_finance_$_streamKey'),
-        stream: _supabase.from('hotels').stream(primaryKey: ['id']),
-        builder: (context, hotelSnapshot) {
-          return StreamBuilder<List<Map<String, dynamic>>>(
-            key: ValueKey('rooms_finance_$_streamKey'),
-            stream: _supabase.from('rooms').stream(primaryKey: ['id']),
-            builder: (context, roomSnapshot) {
-              return StreamBuilder<List<Map<String, dynamic>>>(
-                key: ValueKey('bookings_finance_$_streamKey'),
-                stream: _supabase.from('bookings').stream(primaryKey: ['id']),
-                builder: (context, bookingSnapshot) {
-                  if (hotelSnapshot.connectionState == ConnectionState.waiting &&
-                      !hotelSnapshot.hasData) {
-                    return const Center(
-                      child: CircularProgressIndicator(color: AppColors.goldPrimary),
-                    );
-                  }
+      body: _buildMainContent(currencyFormat),
+    );
+  }
 
-                  final hotelsData = hotelSnapshot.data ?? [];
-                  final roomsData = roomSnapshot.data ?? [];
-                  final bookingsData = bookingSnapshot.data ?? [];
+  Widget _buildMainContent(NumberFormat currencyFormat) {
+    if (_isLoading && _hotelsData.isEmpty) {
+      return const Center(
+        child: CircularProgressIndicator(color: AppColors.goldPrimary),
+      );
+    }
+
+    if (_errorMessage != null && _hotelsData.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.cloud_off_rounded, color: AppColors.rose, size: 48),
+              const SizedBox(height: 16),
+              Text(
+                "Finance Realtime Sync Error",
+                style: GoogleFonts.plusJakartaSans(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "$_errorMessage",
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                onPressed: _handleManualRefresh,
+                icon: const Icon(Icons.refresh_rounded, size: 16),
+                label: const Text("RETRY LIVE CONNECTION", style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.goldPrimary,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final hotelsData = _hotelsData;
+    final roomsData = _roomsData;
+    final bookingsData = _bookingsData;
 
                   // Map room_id to hotel
                   final Map<String, Map<String, dynamic>> roomToHotelMap = {};
@@ -1696,12 +1782,13 @@ Reference: $invoiceNo
                   final double unsettledCommissionTotal = unsettledGross * 0.10;
                   final double clearedCommissionTotal = clearedGross * 0.10;
 
-                  // Group balances by Hotel (Only active/approved partners)
+                  // Group balances by Hotel (Include all approved and blocked partner venues)
                   final Map<String, Map<String, dynamic>> hotelLedgers = {};
                   for (var h in hotelsData) {
                     final status = (h['status'] ?? '').toString().toLowerCase().trim();
-                    final bool isApproved = status == 'approved' && h['is_approved'] == true;
-                    if (!isApproved) continue; // Exclude non-active / rejected hotels
+                    final bool isApproved = status == 'approved' || h['is_approved'] == true;
+                    final bool isBlocked = status == 'blocked';
+                    if (!isApproved && !isBlocked) continue; // Exclude non-active / rejected hotels
 
                     final hId = h['id'].toString();
                     hotelLedgers[hId] = {
@@ -1721,22 +1808,33 @@ Reference: $invoiceNo
                     final hotel = roomToHotelMap[roomId];
                     if (hotel != null) {
                       final hId = hotel['id'].toString();
-                      if (hotelLedgers.containsKey(hId)) {
-                        final price = (double.tryParse(b['total_price']?.toString() ?? '0') ?? 0.0);
-                        final comm = price * 0.10;
-                        final status = (b['status'] ?? 'pending').toString().toLowerCase().trim();
-                        final list = hotelLedgers[hId]!['bookings'] as List<Map<String, dynamic>>;
-                        list.add(b);
+                      if (!hotelLedgers.containsKey(hId)) {
+                        // Ensure hotel is present in ledger even if status transitioned
+                        hotelLedgers[hId] = {
+                          'hotel': hotel,
+                          'bookings': <Map<String, dynamic>>[],
+                          'totalGross': 0.0,
+                          'clearedGross': 0.0,
+                          'unsettledGross': 0.0,
+                          'totalCommission': 0.0,
+                          'clearedCommission': 0.0,
+                          'unsettledCommission': 0.0,
+                        };
+                      }
+                      final price = (double.tryParse(b['total_price']?.toString() ?? '0') ?? 0.0);
+                      final comm = price * 0.10;
+                      final status = (b['status'] ?? 'pending').toString().toLowerCase().trim();
+                      final list = hotelLedgers[hId]!['bookings'] as List<Map<String, dynamic>>;
+                      list.add(b);
 
-                        hotelLedgers[hId]!['totalGross'] = (hotelLedgers[hId]!['totalGross'] as double) + price;
-                        hotelLedgers[hId]!['totalCommission'] = (hotelLedgers[hId]!['totalCommission'] as double) + comm;
-                        if (status == 'cleared' || status == 'settled_archived') {
-                          hotelLedgers[hId]!['clearedGross'] = (hotelLedgers[hId]!['clearedGross'] as double) + price;
-                          hotelLedgers[hId]!['clearedCommission'] = (hotelLedgers[hId]!['clearedCommission'] as double) + comm;
-                        } else {
-                          hotelLedgers[hId]!['unsettledGross'] = (hotelLedgers[hId]!['unsettledGross'] as double) + price;
-                          hotelLedgers[hId]!['unsettledCommission'] = (hotelLedgers[hId]!['unsettledCommission'] as double) + comm;
-                        }
+                      hotelLedgers[hId]!['totalGross'] = (hotelLedgers[hId]!['totalGross'] as double) + price;
+                      hotelLedgers[hId]!['totalCommission'] = (hotelLedgers[hId]!['totalCommission'] as double) + comm;
+                      if (status == 'cleared' || status == 'settled_archived') {
+                        hotelLedgers[hId]!['clearedGross'] = (hotelLedgers[hId]!['clearedGross'] as double) + price;
+                        hotelLedgers[hId]!['clearedCommission'] = (hotelLedgers[hId]!['clearedCommission'] as double) + comm;
+                      } else {
+                        hotelLedgers[hId]!['unsettledGross'] = (hotelLedgers[hId]!['unsettledGross'] as double) + price;
+                        hotelLedgers[hId]!['unsettledCommission'] = (hotelLedgers[hId]!['unsettledCommission'] as double) + comm;
                       }
                     }
                   }
@@ -1908,13 +2006,6 @@ Reference: $invoiceNo
                       );
                     },
                   );
-                },
-              );
-            },
-          );
-        },
-      ),
-    );
   }
 
   Widget _buildTabChip({
@@ -2056,149 +2147,169 @@ Reference: $invoiceNo
             borderRadius: BorderRadius.circular(18),
             border: Border.all(color: AppColors.surfaceBorder),
           ),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: isCleared
-                      ? AppColors.emerald.withValues(alpha: 0.12)
-                      : (isReceived ? AppColors.goldPrimary.withValues(alpha: 0.12) : AppColors.amber.withValues(alpha: 0.12)),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(
-                  isCleared
-                      ? Icons.verified_rounded
-                      : (isReceived ? Icons.payments_rounded : Icons.pending_rounded),
-                  color: isCleared
-                      ? AppColors.emerald
-                      : (isReceived ? AppColors.goldPrimary : AppColors.amber),
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isCleared
+                          ? AppColors.emerald.withValues(alpha: 0.12)
+                          : (isReceived ? AppColors.goldPrimary.withValues(alpha: 0.12) : AppColors.amber.withValues(alpha: 0.12)),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(
+                      isCleared
+                          ? Icons.verified_rounded
+                          : (isReceived ? Icons.payments_rounded : Icons.pending_rounded),
+                      color: isCleared
+                          ? AppColors.emerald
+                          : (isReceived ? AppColors.goldPrimary : AppColors.amber),
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          hotelName,
-                          style: const TextStyle(
-                            color: AppColors.textPrimary,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isCleared
-                                ? AppColors.emerald.withValues(alpha: 0.1)
-                                : (isReceived ? AppColors.goldPrimary.withValues(alpha: 0.1) : AppColors.amber.withValues(alpha: 0.1)),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            status.toUpperCase(),
-                            style: TextStyle(
-                              color: isCleared
-                                  ? AppColors.emerald
-                                  : (isReceived ? AppColors.goldPrimary : AppColors.amber),
-                              fontSize: 9,
-                              fontWeight: FontWeight.bold,
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                hotelName,
+                                style: const TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 15,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
+                            const SizedBox(width: 10),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: isCleared
+                                    ? AppColors.emerald.withValues(alpha: 0.1)
+                                    : (isReceived ? AppColors.goldPrimary.withValues(alpha: 0.1) : AppColors.amber.withValues(alpha: 0.1)),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                status.toUpperCase(),
+                                style: TextStyle(
+                                  color: isCleared
+                                      ? AppColors.emerald
+                                      : (isReceived ? AppColors.goldPrimary : AppColors.amber),
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          "Guest: ${b['full_name'] ?? 'Guest'} • Ref: #${bookingId.substring(0, bookingId.length > 8 ? 8 : bookingId.length)} • Method: ${(b['payment_method'] ?? 'Online').toString().toUpperCase()}",
+                          style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "Guest: ${b['full_name'] ?? 'Guest'} • Ref: #${bookingId.substring(0, bookingId.length > 8 ? 8 : bookingId.length)} • Method: ${(b['payment_method'] ?? 'Online').toString().toUpperCase()}",
-                      style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    "PKR ${NumberFormat('#,##0').format(amount * 0.10)}",
-                    style: const TextStyle(
-                      color: AppColors.goldPrimary,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16,
-                    ),
                   ),
-                  Text(
-                    "Negoo 10% Cut (Gross: PKR ${NumberFormat('#,##0').format(amount)})",
-                    style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        "PKR ${NumberFormat('#,##0').format(amount * 0.10)}",
+                        style: const TextStyle(
+                          color: AppColors.goldPrimary,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 16,
+                        ),
+                      ),
+                      Text(
+                        "Negoo 10% Cut (Gross: PKR ${NumberFormat('#,##0').format(amount)})",
+                        style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
+                      ),
+                    ],
                   ),
                 ],
               ),
-              const SizedBox(width: 14),
-              OutlinedButton.icon(
-                onPressed: () => _showInvoiceDialog(
-                  booking: b,
-                  hotel: hotel,
-                  isPaid: isCleared,
-                ),
-                icon: const Icon(Icons.receipt_long_rounded, size: 14),
-                label: const Text("INVOICE", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: isCleared ? AppColors.emerald : AppColors.amber,
-                  side: BorderSide(
-                    color: (isCleared ? AppColors.emerald : AppColors.amber).withValues(alpha: 0.5),
-                  ),
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (isPending) ...[
-                if (!isReceived)
-                  OutlinedButton.icon(
-                    onPressed: _processing ? null : () => _markPaymentReceived(bookingId),
-                    icon: const Icon(Icons.check_rounded, size: 14),
-                    label: const Text("COMMISSION RECEIVED", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.goldPrimary,
-                      side: const BorderSide(color: AppColors.goldPrimary),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
-                  ),
-                const SizedBox(width: 8),
-                ElevatedButton.icon(
-                  onPressed: _processing ? null : () => _showClearPaymentDialog(b, hotelName),
-                  icon: const Icon(Icons.done_all_rounded, size: 14),
-                  label: const Text("CLEAR COMMISSION", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.emerald,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                ),
-              ] else
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppColors.emerald.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.emerald.withValues(alpha: 0.3)),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Icon(Icons.check_circle_rounded, color: AppColors.emerald, size: 14),
-                      SizedBox(width: 4),
-                      Text("COMMISSION CLEARED", style: TextStyle(color: AppColors.emerald, fontSize: 10, fontWeight: FontWeight.bold)),
+                      OutlinedButton.icon(
+                        onPressed: () => _showInvoiceDialog(
+                          booking: b,
+                          hotel: hotel,
+                          isPaid: isCleared,
+                        ),
+                        icon: const Icon(Icons.receipt_long_rounded, size: 14),
+                        label: const Text("INVOICE", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: isCleared ? AppColors.emerald : AppColors.amber,
+                          side: BorderSide(
+                            color: (isCleared ? AppColors.emerald : AppColors.amber).withValues(alpha: 0.5),
+                          ),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                      ),
+                      if (isPending) ...[
+                        if (!isReceived)
+                          OutlinedButton.icon(
+                            onPressed: _processing ? null : () => _markPaymentReceived(bookingId),
+                            icon: const Icon(Icons.check_rounded, size: 14),
+                            label: const Text("COMMISSION RECEIVED", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppColors.goldPrimary,
+                              side: const BorderSide(color: AppColors.goldPrimary),
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                          ),
+                        ElevatedButton.icon(
+                          onPressed: _processing ? null : () => _showClearPaymentDialog(b, hotelName),
+                          icon: const Icon(Icons.done_all_rounded, size: 14),
+                          label: const Text("CLEAR COMMISSION", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.emerald,
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                        ),
+                      ] else
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: AppColors.emerald.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: AppColors.emerald.withValues(alpha: 0.3)),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.check_circle_rounded, color: AppColors.emerald, size: 14),
+                              SizedBox(width: 4),
+                              Text("COMMISSION CLEARED", style: TextStyle(color: AppColors.emerald, fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
-                ),
+                ],
+              ),
             ],
           ),
         );
@@ -2362,8 +2473,10 @@ Reference: $invoiceNo
                 ],
               ),
               const SizedBox(height: 18),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
                 children: [
                   OutlinedButton.icon(
                     onPressed: () => _showHotelStatementInvoiceDialog(
@@ -2382,7 +2495,6 @@ Reference: $invoiceNo
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
                   ),
-                  const SizedBox(width: 8),
                   if (!isBlocked)
                     OutlinedButton.icon(
                       onPressed: () => _showBlockDialog(hotelId, hotelName),
@@ -2407,7 +2519,6 @@ Reference: $invoiceNo
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       ),
                     ),
-                  const SizedBox(width: 8),
                   if (unsettledComm > 0)
                     ElevatedButton.icon(
                       onPressed: _processing
