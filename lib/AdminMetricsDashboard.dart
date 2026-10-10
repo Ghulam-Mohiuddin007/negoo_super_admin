@@ -133,7 +133,7 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
               final int totalHotels = hotelsData.length;
               final int approvedHotels = hotelsData.where((item) {
                 final s = (item['status'] ?? '').toString().toLowerCase().trim();
-                return s == 'approved' || item['is_approved'] == true;
+                return s == 'approved' && item['is_approved'] == true;
               }).length;
 
               final int rejectedHotels = hotelsData.where((item) {
@@ -143,7 +143,7 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
 
               final int pendingHotels = hotelsData.where((item) {
                 final s = (item['status'] ?? '').toString().toLowerCase().trim();
-                if (s == 'rejected') return false;
+                if (s == 'rejected' || s == 'blocked') return false;
                 if (s == 'approved' || item['is_approved'] == true) return false;
                 return s == 'pending' || item['is_approved'] == false;
               }).length;
@@ -223,12 +223,12 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
                                 childAspectRatio: isDesktop ? 1.5 : (isTablet ? 1.6 : 2.0),
                                 children: [
                                   StatCard(
-                                    label: "Total Venue Partners",
-                                    value: "$totalHotels",
+                                    label: "Active Partner Venues",
+                                    value: "$approvedHotels",
                                     icon: Icons.domain_rounded,
-                                    accentColor: AppColors.goldPrimary,
-                                    subtitle: "$approvedHotels Active • $pendingHotels In Queue",
-                                    badgeText: "REALTIME",
+                                    accentColor: AppColors.emerald,
+                                    subtitle: "$totalHotels Registered • $pendingHotels In Queue",
+                                    badgeText: "ACTIVE",
                                   ),
                                   StatCard(
                                     label: "Gross Booking Volume",
@@ -387,54 +387,65 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
               children: [
                 Expanded(
                   flex: 5,
-                  child: total == 0
-                      ? const Center(
+                  child: Builder(
+                    builder: (context) {
+                      final List<PieChartSectionData> chartSections = [
+                        if (approved > 0)
+                          PieChartSectionData(
+                            color: AppColors.emerald,
+                            value: approved.toDouble(),
+                            title: "$approved",
+                            radius: 26,
+                            titleStyle: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                        if (pending > 0)
+                          PieChartSectionData(
+                            color: AppColors.amber,
+                            value: pending.toDouble(),
+                            title: "$pending",
+                            radius: 26,
+                            titleStyle: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                        if (rejected > 0)
+                          PieChartSectionData(
+                            color: AppColors.rose,
+                            value: rejected.toDouble(),
+                            title: "$rejected",
+                            radius: 26,
+                            titleStyle: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12,
+                            ),
+                          ),
+                      ];
+
+                      if (total == 0 || chartSections.isEmpty) {
+                        return const Center(
                           child: Text(
                             "No property data registered",
                             style: TextStyle(color: AppColors.textMuted),
                           ),
-                        )
-                      : PieChart(
-                          PieChartData(
-                            sectionsSpace: 4,
-                            centerSpaceRadius: 46,
-                            sections: [
-                              PieChartSectionData(
-                                color: AppColors.emerald,
-                                value: approved.toDouble() > 0 ? approved.toDouble() : 0.001,
-                                title: approved > 0 ? "$approved" : "",
-                                radius: 26,
-                                titleStyle: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              PieChartSectionData(
-                                color: AppColors.amber,
-                                value: pending.toDouble() > 0 ? pending.toDouble() : 0.001,
-                                title: pending > 0 ? "$pending" : "",
-                                radius: 26,
-                                titleStyle: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              PieChartSectionData(
-                                color: AppColors.rose,
-                                value: rejected.toDouble() > 0 ? rejected.toDouble() : 0.001,
-                                title: rejected > 0 ? "$rejected" : "",
-                                radius: 26,
-                                titleStyle: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ],
-                          ),
+                        );
+                      }
+
+                      return PieChart(
+                        PieChartData(
+                          sectionsSpace: 4,
+                          centerSpaceRadius: 46,
+                          sections: chartSections,
                         ),
+                      );
+                    },
+                  ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
@@ -640,12 +651,15 @@ class _AdminMetricsDashboardState extends State<AdminMetricsDashboard> {
       final Color statusColor;
       final String statusTag;
 
-      if (status == 'approved' || h['is_approved'] == true) {
-        statusColor = AppColors.emerald;
-        statusTag = 'APPROVED';
-      } else if (status == 'rejected') {
+      if (status == 'rejected') {
         statusColor = AppColors.rose;
         statusTag = 'REJECTED';
+      } else if (status == 'blocked') {
+        statusColor = AppColors.rose;
+        statusTag = 'BLOCKED';
+      } else if ((status == 'approved' || h['is_approved'] == true) && status != 'pending') {
+        statusColor = AppColors.emerald;
+        statusTag = 'APPROVED';
       } else {
         statusColor = AppColors.amber;
         statusTag = 'PENDING AUDIT';

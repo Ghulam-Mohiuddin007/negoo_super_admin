@@ -89,6 +89,28 @@ class _AdminPartnerManagementScreenState
     }
   }
 
+  Future<void> _blockPartner(String id, String name) async {
+    try {
+      await _supabase
+          .from('hotels')
+          .update({
+            'status': 'blocked',
+            'is_approved': false,
+            'reg_no': 'BLOCKED BY HQ - PAYMENT DEFAULT / SUSPENSION',
+          })
+          .eq('id', id);
+
+      if (!mounted) return;
+      _notify("$name blocked from live operations & booking terminals.", AppColors.rose);
+
+      if (_selectedPartnerWeb?['id']?.toString() == id) {
+        setState(() => _selectedPartnerWeb = null);
+      }
+    } catch (e) {
+      _notify("Block Error: $e", AppColors.rose);
+    }
+  }
+
   void _notify(String msg, Color color) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -170,8 +192,12 @@ class _AdminPartnerManagementScreenState
 
               final rawPartners = snapshot.data ?? [];
 
-              // Apply Search Filter
+              // Apply Search Filter with strict approval check
               final activePartners = rawPartners.where((p) {
+                final status = (p['status'] ?? '').toString().toLowerCase().trim();
+                final bool isApproved = status == 'approved' && p['is_approved'] == true;
+                if (!isApproved) return false;
+
                 if (_searchQuery.isEmpty) return true;
                 final name = (p['hotel_name'] ?? p['name'] ?? '').toString().toLowerCase();
                 final phone = (p['phone_number'] ?? '').toString().toLowerCase();
@@ -183,8 +209,14 @@ class _AdminPartnerManagementScreenState
                     id.contains(_searchQuery);
               }).toList();
 
-              // Auto-select first item on desktop
-              if (isDesktop &&
+              // Auto-select first item on desktop, or clear if active list is empty
+              if (activePartners.isEmpty && _selectedPartnerWeb != null) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && _selectedPartnerWeb != null) {
+                    setState(() => _selectedPartnerWeb = null);
+                  }
+                });
+              } else if (isDesktop &&
                   _selectedPartnerWeb == null &&
                   activePartners.isNotEmpty) {
                 WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -835,33 +867,50 @@ class _AdminPartnerManagementScreenState
             Expanded(
               child: OutlinedButton.icon(
                 onPressed: () => _suspendPartner(targetHotelId, venueName),
-                icon: const Icon(Icons.pause_circle_outline_rounded, size: 18),
+                icon: const Icon(Icons.pause_circle_outline_rounded, size: 16),
                 label: const Text(
-                  "SUSPEND ACCESS",
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                  "SUSPEND",
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
                 ),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: AppColors.amber,
                   side: const BorderSide(color: AppColors.amber),
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
               ),
             ),
-            const SizedBox(width: 14),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: () => _blockPartner(targetHotelId, venueName),
+                icon: const Icon(Icons.block_rounded, size: 16),
+                label: const Text(
+                  "BLOCK HOTEL",
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.rose,
+                  side: const BorderSide(color: AppColors.rose),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
             Expanded(
               child: ElevatedButton.icon(
                 onPressed: () => _showSuspensionWarning(targetHotelId, venueName),
-                icon: const Icon(Icons.delete_forever_rounded, size: 18),
+                icon: const Icon(Icons.delete_forever_rounded, size: 16),
                 label: const Text(
-                  "TERMINATE ROW",
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                  "TERMINATE",
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
                 ),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.rose,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
               ),
             ),

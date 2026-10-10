@@ -3,6 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:negoo_super_admin/AdminHotelPipelineScreen.dart';
 import 'package:negoo_super_admin/AdminMetricsDashboard.dart';
 import 'package:negoo_super_admin/AdminPartnerManagementScreen.dart';
+import 'package:negoo_super_admin/AdminPaymentSettlementScreen.dart';
 import 'package:negoo_super_admin/admin_login.dart';
 import 'package:negoo_super_admin/splash_screen.dart';
 import 'package:negoo_super_admin/theme/app_theme.dart';
@@ -49,6 +50,7 @@ class _AdminMainNavigationShellState extends State<AdminMainNavigationShell> {
     AdminMetricsDashboard(),
     AdminHotelPipelineScreen(),
     AdminPartnerManagementScreen(),
+    AdminPaymentSettlementScreen(),
   ];
 
   Future<void> _handleSignOut() async {
@@ -197,6 +199,12 @@ class _AdminMainNavigationShellState extends State<AdminMainNavigationShell> {
                               label: "Active Partners",
                               icon: Icons.domain_rounded,
                             ),
+                            const SizedBox(height: 8),
+                            _buildSidebarNavButton(
+                              index: 3,
+                              label: "Payment Settlements",
+                              icon: Icons.payments_rounded,
+                            ),
                           ],
                         ),
                       ),
@@ -333,6 +341,11 @@ class _AdminMainNavigationShellState extends State<AdminMainNavigationShell> {
                   icon: Icon(Icons.domain_outlined),
                   activeIcon: Icon(Icons.domain_rounded),
                   label: 'Partners',
+                ),
+                BottomNavigationBarItem(
+                  icon: Icon(Icons.payments_outlined),
+                  activeIcon: Icon(Icons.payments_rounded),
+                  label: 'Finance',
                 ),
               ],
             ),
