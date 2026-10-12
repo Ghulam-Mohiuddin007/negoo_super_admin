@@ -132,19 +132,46 @@ class _AdminPaymentSettlementScreenState
     }
   }
 
-  // Action 2: Clear & Settle Negoo Commission (Platform 10% collected)
+  // Action 2: Clear & Settle Negoo Commission (Platform 10% collected, one-time)
   Future<void> _clearPayment(String bookingId, double totalAmount) async {
     setState(() => _processing = true);
     final commission = totalAmount * 0.10;
+    final now = DateTime.now().toIso8601String();
 
     try {
       await _supabase
           .from('bookings')
-          .update({'status': 'cleared'})
+          .update({
+            'status': 'cleared',
+            'commission_paid': true,
+            'commission_status': 'paid',
+            'remittance_status': 'verified',
+            'commission_settled_at': now,
+            'commission_verified_by': 'superadmin',
+          })
           .eq('id', bookingId);
 
+      // Dispatch notification to hotel
+      try {
+        final b = _bookingsData.firstWhere((item) => item['id']?.toString() == bookingId, orElse: () => {});
+        final roomId = b['room_id']?.toString();
+        final hotelId = _roomsData.firstWhere((r) => r['id']?.toString() == roomId, orElse: () => {})['hotel_id']?.toString();
+        if (hotelId != null && hotelId.isNotEmpty) {
+          await _supabase.from('notifications').insert({
+            'hotel_id': hotelId,
+            'title': 'Negoo Commission Dues Cleared! ✅',
+            'body': 'Super Admin has verified your referral number and cleared platform dues.',
+            'type': 'commission_cleared',
+            'data': {
+              'booking_id': bookingId,
+              'cleared_at': now,
+            },
+          });
+        }
+      } catch (_) {}
+
       _notify(
-        "Commission Cleared! Negoo 10% cut (PKR ${NumberFormat('#,##0').format(commission)}) collected into platform treasury.",
+        "Commission Dues Cleared! Negoo 10% cut (PKR ${NumberFormat('#,##0').format(commission)}) collected into platform treasury.",
         AppColors.emerald,
       );
       await _fetchLiveFinanceData(silent: true);
@@ -355,6 +382,10 @@ class _AdminPaymentSettlementScreenState
     final commission = amount * 0.10;
     final partnerCut = amount * 0.90;
     final bookingId = booking['id'].toString();
+    final String? referralNum = booking['remittance_ref']?.toString();
+    final bool hasReferral = referralNum != null && referralNum.trim().isNotEmpty;
+    final String bStatus = (booking['status'] ?? '').toString().toLowerCase();
+    final bool isCheckedOut = bStatus == 'checked_out' || booking['checked_out_at'] != null;
 
     showDialog(
       context: context,
@@ -402,17 +433,21 @@ class _AdminPaymentSettlementScreenState
                     _buildReceiptRow("Partner Disbursed Net (90%)", "PKR ${NumberFormat('#,##0').format(partnerCut)}", AppColors.textMuted),
                     const Divider(height: 16, color: AppColors.surfaceBorder),
                     _buildReceiptRow("Negoo Commission to Clear (10%)", "PKR ${NumberFormat('#,##0').format(commission)}", AppColors.goldPrimary),
+                    const Divider(height: 16, color: AppColors.surfaceBorder),
+                    _buildReceiptRow("Hotel Referral Number", hasReferral ? referralNum : "Not Submitted Yet", hasReferral ? AppColors.goldPrimary : AppColors.amber),
+                    const Divider(height: 16, color: AppColors.surfaceBorder),
+                    _buildReceiptRow("Guest Status", isCheckedOut ? "Checked Out (Eligible)" : "In Stay (Awaiting Check-Out)", isCheckedOut ? AppColors.emerald : AppColors.amber),
                   ],
                 ),
               ),
               const SizedBox(height: 14),
               Row(
                 children: [
-                  const Icon(Icons.info_outline_rounded, color: AppColors.emerald, size: 16),
+                  const Icon(Icons.verified_user_rounded, color: AppColors.emerald, size: 16),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      "This marks only the 10% Negoo platform cut (PKR ${NumberFormat('#,##0').format(commission)}) as settled into corporate revenue.",
+                      "One-Time Settlement: Clearing this commission settles Negoo platform dues to PKR 0 and records verification in platform treasury.",
                       style: GoogleFonts.plusJakartaSans(color: AppColors.textMuted, fontSize: 11),
                     ),
                   ),
@@ -1766,10 +1801,11 @@ Reference: $invoiceNo
                   for (var b in bookingsData) {
                     final double price = (double.tryParse(b['total_price']?.toString() ?? '0') ?? 0.0);
                     final status = (b['status'] ?? 'pending').toString().toLowerCase().trim();
+                    final bool isCleared = status == 'cleared' || status == 'settled_archived' || b['commission_paid'] == true || b['commission_status'] == 'paid' || b['remittance_status'] == 'verified';
 
                     grossTotal += price;
 
-                    if (status == 'cleared' || status == 'settled_archived') {
+                    if (isCleared) {
                       clearedGross += price;
                       clearedBookings.add(b);
                     } else {
@@ -1829,7 +1865,8 @@ Reference: $invoiceNo
 
                       hotelLedgers[hId]!['totalGross'] = (hotelLedgers[hId]!['totalGross'] as double) + price;
                       hotelLedgers[hId]!['totalCommission'] = (hotelLedgers[hId]!['totalCommission'] as double) + comm;
-                      if (status == 'cleared' || status == 'settled_archived') {
+                      final bool isCleared = status == 'cleared' || status == 'settled_archived' || b['commission_paid'] == true || b['commission_status'] == 'paid' || b['remittance_status'] == 'verified';
+                      if (isCleared) {
                         hotelLedgers[hId]!['clearedGross'] = (hotelLedgers[hId]!['clearedGross'] as double) + price;
                         hotelLedgers[hId]!['clearedCommission'] = (hotelLedgers[hId]!['clearedCommission'] as double) + comm;
                       } else {
@@ -2137,7 +2174,10 @@ Reference: $invoiceNo
         final double amount = (double.tryParse(b['total_price']?.toString() ?? '0') ?? 0.0);
         final status = (b['status'] ?? 'pending').toString().toLowerCase().trim();
         final bool isReceived = status == 'payment_received';
-        final bool isCleared = status == 'cleared';
+        final bool isCleared = status == 'cleared' || status == 'settled_archived' || b['commission_paid'] == true || b['commission_status'] == 'paid' || b['remittance_status'] == 'verified';
+        final String? referralNum = b['remittance_ref']?.toString();
+        final bool hasReferral = referralNum != null && referralNum.trim().isNotEmpty;
+        final bool isCheckedOut = status == 'checked_out' || b['checked_out_at'] != null;
 
         return Container(
           margin: const EdgeInsets.only(bottom: 12),
@@ -2216,6 +2256,42 @@ Reference: $invoiceNo
                           "Guest: ${b['full_name'] ?? 'Guest'} • Ref: #${bookingId.substring(0, bookingId.length > 8 ? 8 : bookingId.length)} • Method: ${(b['payment_method'] ?? 'Online').toString().toUpperCase()}",
                           style: const TextStyle(color: AppColors.textMuted, fontSize: 11),
                         ),
+                        if (hasReferral)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: AppColors.goldPrimary.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: AppColors.goldPrimary.withValues(alpha: 0.35)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.tag_rounded, size: 12, color: AppColors.goldPrimary),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    "HOTEL REFERRAL NO: $referralNum",
+                                    style: const TextStyle(
+                                      color: AppColors.goldPrimary,
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    isCleared ? "• (Dues Settled)" : (isCheckedOut ? "• (Ready for Clearance)" : "• (In Stay)"),
+                                    style: TextStyle(
+                                      color: isCleared ? AppColors.emerald : (isCheckedOut ? AppColors.goldPrimary : AppColors.textMuted),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -2281,7 +2357,7 @@ Reference: $invoiceNo
                         ElevatedButton.icon(
                           onPressed: _processing ? null : () => _showClearPaymentDialog(b, hotelName),
                           icon: const Icon(Icons.done_all_rounded, size: 14),
-                          label: const Text("CLEAR COMMISSION", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                          label: const Text("CLEAR DUES (ONE-TIME)", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.emerald,
                             foregroundColor: Colors.black,
@@ -2302,7 +2378,7 @@ Reference: $invoiceNo
                             children: [
                               Icon(Icons.check_circle_rounded, color: AppColors.emerald, size: 14),
                               SizedBox(width: 4),
-                              Text("COMMISSION CLEARED", style: TextStyle(color: AppColors.emerald, fontSize: 11, fontWeight: FontWeight.bold)),
+                              Text("DUES CLEARED (ONE-TIME SETTLED)", style: TextStyle(color: AppColors.emerald, fontSize: 11, fontWeight: FontWeight.bold)),
                             ],
                           ),
                         ),
